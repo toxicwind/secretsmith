@@ -26,8 +26,10 @@ import base64
 import copy
 import json
 import os
+import shlex
 import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import time
@@ -733,6 +735,54 @@ def _secret_rows(rows, show):
     return red
 
 
+def cmd_env(svc, a, registry, as_json):
+    """Print sh-quoted `export VAR=...` lines (opt-in: values ARE printed)."""
+    lines = []
+    for spec in a.env:
+        var, value = _resolve_env_spec(svc, a, registry, spec)
+        lines.append("export %s=%s" % (var, shlex.quote(value)))
+    if as_json:
+        print(json.dumps({v.split("=", 1)[0]: v.split("=", 1)[1] for v in
+                          [l[len("export "):] for l in lines]}, indent=2))
+    else:
+        for l in lines:
+            print(l)
+    return 0
+
+
+def cmd_exec(svc, a, registry, as_json):
+    """Run cmd with secrets injected as env vars. Secrets are never printed."""
+    env = dict(os.environ)
+    for spec in a.env:
+        var, value = _resolve_env_spec(svc, a, registry, spec)
+        env[var] = value
+    try:
+        proc = subprocess.run(a.command, env=env)
+    except FileNotFoundError as e:
+        raise SecretsmithError("cannot exec %r: %s" % (a.command[0], e))
+    return proc.returncode
+
+
+def _resolve_env_spec(svc, a, registry, spec):
+    """Resolve `VAR=<k=v[,k2=v2...]>` to (VAR, secret). Refuses os_crypt keys."""
+    if "=" not in spec:
+        raise SecretsmithError("env spec must be VAR=k=v[,k2=v2...], got %r" % spec)
+    var, attrspec = spec.split("=", 1)
+    if not var.isidentifier():
+        raise SecretsmithError("env var name %r is not a valid identifier" % var)
+    filters = parse_attrs(attrspec.split(","))
+    found = svc.search(filters, collection=a.collection)
+    if not found:
+        raise SecretsmithError("no item matches %r" % filters)
+    if len(found) > 1:
+        raise SecretsmithError("%d items match %r — refine attributes" % (len(found), filters))
+    it = found[0]
+    _refuse_protected(it, registry)
+    svc.ensure_unlocked_items([it])
+    secret, _ct = svc.get_secret(it["path"])
+    return var, secret.decode("utf-8", "replace")
+
+
 def cmd_chromium_logins(svc, a, registry, as_json):
     profile = a.profile_dir or os.path.expanduser("~/.config/chromium/Default")
     rows = chromium_logins(svc, registry, profile)
@@ -816,6 +866,17 @@ def build_parser():
 
     sub.add_parser("schemas", help="list the known-schema registry").set_defaults(func=cmd_schemas)
     sub.add_parser("check", help="health check").set_defaults(func=cmd_check)
+    e = sub.add_parser("env", help="print sh-quoted `export VAR=...` lines for sourcing (values ARE printed — pipe, never log)")
+    e.add_argument("--env", action="append", required=True, metavar="VAR=k=v[,k2=v2...]",
+                   help="resolve one keyring item to an env var; repeatable")
+    e.add_argument("--collection", help="restrict search to a collection")
+    e.set_defaults(func=cmd_env)
+    x = sub.add_parser("exec", help="run a command with secrets injected as env vars (secrets never printed)")
+    x.add_argument("--env", action="append", required=True, metavar="VAR=k=v[,k2=v2...]",
+                   help="resolve one keyring item to an env var; repeatable")
+    x.add_argument("--collection", help="restrict search to a collection")
+    x.add_argument("command", nargs="+", help="command to run with the injected environment")
+    x.set_defaults(func=cmd_exec)
 
     cl = sub.add_parser("chromium-logins", help="decrypt Chromium Login Data")
     cl.add_argument("--profile-dir", default="")
