@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# secretsmith — primary operation: the secretsmith keyring CLI (search/get/set/
+# delete/collections/lock/unlock/schemas/check/env/exec/chromium-*).
+# This is the estate SECURITY SSOT (freedesktop Secret Service keyring).
+#
+# Usage:
+#   bin/run [subcommand args...]   # pass through to the CLI (default: check)
+#   bin/run check                  # live keyring health check (PASS/FAIL gate)
+#
+# Values from `get`/`env` ARE printed by design (secret injection) — pipe, never
+# log them. Metal guides never commit plaintext creds to git.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+LAUNCHER="$(pwd)/bin/secretsmith"
+[ -x "$LAUNCHER" ] || { echo "FAIL: bin/secretsmith launcher missing"; exit 1; }
+
+if [ "$#" -eq 0 ]; then
+  if "${LAUNCHER}" check >/dev/null 2>&1; then
+    exec "${LAUNCHER}" check
+  else
+    echo "secretsmith: live keyring check unavailable (no DBus session?) — printing schema registry."
+    exec "${LAUNCHER}" schemas
+  fi
+fi
+
+exec "${LAUNCHER}" "$@"

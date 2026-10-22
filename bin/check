@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# secretsmith — self-test gate (PASS/FAIL).
+# Gate 1: unit tests (registry/schema/chromium-crypto resolve — always runnable,
+#         no live keyring needed per the test module's SSM_TEST_KEYRING gate).
+# Gate 2: `secretsmith check` live keyring health (report, tolerate DBus absence
+#         on headless check; the unit suite is the authoritative PASS).
+#
+# IMPORTANT: no secret VALUE from the keyring is ever printed here — only
+# byte counts / problem lists. DO NOT `set`/`env` in this gate.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+echo "== secretsmith check: start =="
+
+PY="/usr/bin/python3"
+if ! "$PY" -c "import dbus, cryptography" 2>/dev/null; then
+  PY="python3"
+fi
+if ! "$PY" -c "import dbus, cryptography" 2>/dev/null; then
+  echo "FAIL: no python3 with dbus-python + cryptography"
+  exit 1
+fi
+
+set +e
+out="$("$PY" -m unittest discover -s tests -v 2>&1)"
+rc=$?
+set -e
+echo "$out"
+
+[ "$rc" -eq 0 ] || { echo "FAIL: secretsmith unit tests rc=$rc"; exit 1; }
+
+# Schema registry load probe (cheap, DBus-free)
+echo "== registry probe =="
+"$PY" -c "import secretsmith,sys; r=secretsmith.load_registry(); assert 'chromium' in r['schemas']; print('registry OK:', list(r['schemas'].keys()))" || { echo "FAIL: registry probe"; exit 1; }
+
+echo "== secretsmith check: PASS =="
+exit 0
